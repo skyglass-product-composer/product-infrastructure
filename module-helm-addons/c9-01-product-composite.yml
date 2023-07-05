@@ -1,0 +1,157 @@
+resource "kubernetes_config_map_v1" "product_composite_config" {
+  metadata {
+    name      = "product-composite-config"
+    labels = {
+      app = "product-composite-service"
+    }
+  }
+
+  data = {
+    "application.yml" = file("${path.module}/app-conf/application.yml")
+    "product-composite.yml" = file("${path.module}/app-conf/product-composite.yml")
+  }
+}
+
+
+resource "kubernetes_deployment_v1" "product_composite_service_deployment" {
+  metadata {
+    name = "product-composite-service"
+    labels = {
+      app = "product-composite-service"
+    }
+  }
+ 
+  spec {
+    replicas = 1
+    selector {
+      match_labels = {
+        app = "product-composite-service"
+      }
+    }
+    template {
+      metadata {
+        labels = {
+          app = "product-composite-service"
+        }
+      }
+      spec {
+        volume {
+          name = "product-composite-config-volume""    
+          config_map {
+            name = "product-composite-config"
+          }
+        }
+        container {
+          image = "ghcr.io/skyglass-product-composite-composer/product-composite-service"
+          name  = "product-composite-service"
+          image_pull_policy = "Always"
+
+          env {
+            name  = "SPRING_CONFIG_LOCATION"
+            value = "file:/config-repo/application.yml,file:/config-repo/product-composite.yml"
+          }
+
+          env {
+            name  = "SPRING_PROFILES_ACTIVE"
+            value = "docker,prod"
+          }
+
+          env_from {
+            secret_ref {
+              name = kubernetes_secret_v1.rabbitmq-credentials.metadata[0].name
+            }
+          }
+
+          liveness_probe {
+            failure_threshold = 20
+
+            http_get {
+              path   = "/actuator/health/liveness"
+              port   = 80
+              scheme = "HTTP"
+            }
+
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            success_threshold     = 1
+            timeout_seconds       = 2
+          }
+
+          readiness_probe {
+            failure_threshold = 3
+
+            http_get {
+              path   = "/actuator/health/readiness"
+              port   = 80
+              scheme = "HTTP"
+            }
+
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            success_threshold     = 1
+            timeout_seconds       = 2
+          }
+
+          port {
+            container_port = 80
+            name           = "http"
+            protocol       = "TCP"
+          }
+
+          resources {
+            requests = {
+              memory = "200Mi"
+            }
+            limits = {
+              memory = "400Mi"
+            }
+          }
+
+          volume_mount {
+            name       = "product-composite-service"
+            mount_path = "/config-repo"
+          }
+        }
+
+        volume {
+          name = "product-composite-service"
+
+          config_map {
+            name = "product-composite-config"
+          }
+        }    
+      }
+    }  
+  }
+}
+
+
+resource "kubernetes_horizontal_pod_autoscaler_v1" "product_composite_service_hpa" {
+  metadata {
+    name = "product-composite-service-hpa"
+  }
+  spec {
+    max_replicas = 2
+    min_replicas = 1
+    scale_target_ref {
+      api_version = "apps/v1"
+      kind = "Deployment"
+      name = kubernetes_deployment_v1.product_composite_service_deployment.metadata[0].name 
+    }
+    target_cpu_utilization_percentage = 50
+  }
+}
+
+resource "kubernetes_service_v1" "product_composite_service_service" {
+  metadata {
+    name = "product-composite-service"
+  }
+  spec {
+    selector = {
+      app = "product-composite-service"
+    }
+    port {
+      port = 80
+    }
+  }
+}

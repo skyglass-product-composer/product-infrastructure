@@ -1,0 +1,163 @@
+resource "kubernetes_config_map_v1" "review_config" {
+  metadata {
+    name      = "review-config"
+    labels = {
+      app = "review-service"
+    }
+  }
+
+  data = {
+    "application.yml" = file("${path.module}/app-conf/application.yml")
+    "review.yml" = file("${path.module}/app-conf/review.yml")
+  }
+}
+
+
+resource "kubernetes_deployment_v1" "review_service_deployment" {
+  metadata {
+    name = "review-service"
+    labels = {
+      app = "review-service"
+    }
+  }
+ 
+  spec {
+    replicas = 1
+    selector {
+      match_labels = {
+        app = "review-service"
+      }
+    }
+    template {
+      metadata {
+        labels = {
+          app = "review-service"
+        }
+      }
+      spec {
+        volume {
+          name = "review-config-volume""    
+          config_map {
+            name = "review-config"
+          }
+        }
+        container {
+          image = "ghcr.io/skyglass-product-composer/review-service"
+          name  = "review-service"
+          image_pull_policy = "Always"
+
+          env {
+            name  = "SPRING_CONFIG_LOCATION"
+            value = "file:/config-repo/application.yml,file:/config-repo/review.yml"
+          }
+
+          env {
+            name  = "SPRING_PROFILES_ACTIVE"
+            value = "docker,prod"
+          }
+
+          env_from {
+            secret_ref {
+              name = kubernetes_secret_v1.rabbitmq-credentials.metadata[0].name
+            }
+          }
+
+          env_from {
+            secret_ref {
+              name = kubernetes_secret_v1.mysql-credentials.metadata[0].name
+            }
+          }
+
+          liveness_probe {
+            failure_threshold = 20
+
+            http_get {
+              path   = "/actuator/health/liveness"
+              port   = 80
+              scheme = "HTTP"
+            }
+
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            success_threshold     = 1
+            timeout_seconds       = 2
+          }
+
+          readiness_probe {
+            failure_threshold = 3
+
+            http_get {
+              path   = "/actuator/health/readiness"
+              port   = 80
+              scheme = "HTTP"
+            }
+
+            initial_delay_seconds = 10
+            period_seconds        = 10
+            success_threshold     = 1
+            timeout_seconds       = 2
+          }
+
+          port {
+            container_port = 80
+            name           = "http"
+            protocol       = "TCP"
+          }
+
+          resources {
+            requests = {
+              memory = "200Mi"
+            }
+            limits = {
+              memory = "400Mi"
+            }
+          }
+
+          volume_mount {
+            name       = "review-service"
+            mount_path = "/config-repo"
+          }
+        }
+
+        volume {
+          name = "review-service"
+
+          config_map {
+            name = "review-config"
+          }
+        }    
+      }
+    }  
+  }
+}
+
+
+resource "kubernetes_horizontal_pod_autoscaler_v1" "review_service_hpa" {
+  metadata {
+    name = "review-service-hpa"
+  }
+  spec {
+    max_replicas = 2
+    min_replicas = 1
+    scale_target_ref {
+      api_version = "apps/v1"
+      kind = "Deployment"
+      name = kubernetes_deployment_v1.review_service_deployment.metadata[0].name 
+    }
+    target_cpu_utilization_percentage = 50
+  }
+}
+
+resource "kubernetes_service_v1" "review_service_service" {
+  metadata {
+    name = "review-service"
+  }
+  spec {
+    selector = {
+      app = "review-service"
+    }
+    port {
+      port = 80
+    }
+  }
+}
